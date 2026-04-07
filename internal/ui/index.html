@@ -1,0 +1,173 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>gomim live viewer</title>
+<style>
+  :root {
+    --bg: #0e1116;
+    --panel: #161b22;
+    --border: #30363d;
+    --text: #e6edf3;
+    --muted: #8b949e;
+    --accent: #58a6ff;
+    --get: #3fb950;
+    --post: #d29922;
+    --err: #f85149;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; height: 100%; background: var(--bg); color: var(--text); font-family: -apple-system, BlinkMacSystemFont, "SF Mono", Menlo, monospace; font-size: 12px; }
+  header { display: flex; align-items: center; gap: 12px; padding: 8px 12px; border-bottom: 1px solid var(--border); background: var(--panel); }
+  header h1 { font-size: 13px; margin: 0; font-weight: 600; }
+  header input { background: var(--bg); color: var(--text); border: 1px solid var(--border); border-radius: 4px; padding: 4px 8px; flex: 1; max-width: 420px; font: inherit; }
+  header button { background: var(--bg); color: var(--text); border: 1px solid var(--border); border-radius: 4px; padding: 4px 10px; cursor: pointer; font: inherit; }
+  header button:hover { border-color: var(--accent); }
+  header .stat { color: var(--muted); }
+  header .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--err); }
+  header .dot.live { background: var(--get); }
+  main { display: flex; height: calc(100vh - 41px); }
+  #list { width: 50%; overflow-y: auto; border-right: 1px solid var(--border); }
+  #detail { flex: 1; overflow-y: auto; padding: 12px 16px; }
+  .row { display: grid; grid-template-columns: 60px 50px 1fr 60px; gap: 8px; padding: 6px 12px; border-bottom: 1px solid var(--border); cursor: pointer; align-items: baseline; }
+  .row:hover { background: #1c232b; }
+  .row.selected { background: #1f2937; }
+  .row .method { font-weight: 600; }
+  .row .method.GET { color: var(--get); }
+  .row .method.POST { color: var(--post); }
+  .row .method.RES { color: var(--accent); }
+  .row .status { color: var(--muted); }
+  .row .status.s2 { color: var(--get); }
+  .row .status.s4, .row .status.s5 { color: var(--err); }
+  .row .path { color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .row .host { color: var(--muted); }
+  .row .time { color: var(--muted); text-align: right; font-size: 11px; }
+  pre { background: var(--panel); border: 1px solid var(--border); border-radius: 4px; padding: 10px; white-space: pre-wrap; word-break: break-word; max-height: 60vh; overflow: auto; }
+  h3 { font-size: 11px; text-transform: uppercase; color: var(--muted); margin: 16px 0 6px; letter-spacing: 0.05em; }
+  .empty { padding: 40px; text-align: center; color: var(--muted); }
+  .hd { font-family: inherit; }
+  .hd .k { color: var(--accent); }
+</style>
+</head>
+<body>
+<header>
+  <h1>gomim</h1>
+  <span class="dot" id="dot"></span>
+  <span class="stat" id="stat">connecting…</span>
+  <input id="filter" placeholder="filter by host or path…">
+  <button onclick="clearAll()">clear</button>
+  <button id="pause" onclick="togglePause()">pause</button>
+</header>
+<main>
+  <div id="list"></div>
+  <div id="detail"><div class="empty">select a request</div></div>
+</main>
+<script>
+const records = [];
+const listEl = document.getElementById('list');
+const detailEl = document.getElementById('detail');
+const filterEl = document.getElementById('filter');
+const dotEl = document.getElementById('dot');
+const statEl = document.getElementById('stat');
+const pauseBtn = document.getElementById('pause');
+let selected = -1;
+let paused = false;
+let autoscroll = true;
+
+function fmtTime(t) {
+  try { return new Date(t).toLocaleTimeString('en-GB', { hour12: false }) + '.' + String(new Date(t).getMilliseconds()).padStart(3,'0'); }
+  catch { return ''; }
+}
+
+function statusClass(s) {
+  if (!s) return '';
+  return 's' + String(s)[0];
+}
+
+function render() {
+  const q = filterEl.value.trim().toLowerCase();
+  listEl.innerHTML = '';
+  records.forEach((r, i) => {
+    if (q && !((r.host||'').toLowerCase().includes(q) || (r.path||'').toLowerCase().includes(q))) return;
+    const div = document.createElement('div');
+    div.className = 'row' + (i === selected ? ' selected' : '');
+    const method = r.kind === 'response' ? 'RES' : (r.method || '');
+    const status = r.kind === 'response' ? (r.status || '') : '';
+    div.innerHTML = `
+      <span class="method ${method}">${method}</span>
+      <span class="status ${statusClass(status)}">${status}</span>
+      <span class="path"><span class="host">${r.host||''}</span> ${escapeHTML(r.path||'')}</span>
+      <span class="time">${fmtTime(r.time)}</span>
+    `;
+    div.onclick = () => { selected = i; render(); showDetail(r); };
+    listEl.appendChild(div);
+  });
+  if (autoscroll && !paused) listEl.scrollTop = listEl.scrollHeight;
+}
+
+function escapeHTML(s) {
+  return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
+function tryDecodeBody(body, headers) {
+  if (!body) return '';
+  // body comes as raw bytes JSON-escaped; try to pretty-print JSON
+  try {
+    const parsed = JSON.parse(body);
+    return JSON.stringify(parsed, null, 2);
+  } catch {
+    return body;
+  }
+}
+
+function renderHeaders(h) {
+  if (!h) return '';
+  return Object.keys(h).sort().map(k => `<span class="k">${escapeHTML(k)}</span>: ${escapeHTML(h[k])}`).join('\n');
+}
+
+function showDetail(r) {
+  const isReq = r.kind === 'request';
+  const title = isReq
+    ? `${r.method} ${r.host}${r.path}`
+    : `← ${r.status} ${r.host}${r.path} (${r.duration_ms||0}ms)`;
+  detailEl.innerHTML = `
+    <div style="font-size:13px;font-weight:600;margin-bottom:8px;">${escapeHTML(title)}</div>
+    <h3>headers</h3><pre class="hd">${renderHeaders(r.headers)}</pre>
+    <h3>body${r.body_truncated ? ' <span style="color:var(--err)">(truncated)</span>' : ''}</h3><pre>${escapeHTML(tryDecodeBody(r.body, r.headers))}</pre>
+  `;
+}
+
+function clearAll() {
+  records.length = 0;
+  selected = -1;
+  detailEl.innerHTML = '<div class="empty">select a request</div>';
+  render();
+}
+
+function togglePause() {
+  paused = !paused;
+  pauseBtn.textContent = paused ? 'resume' : 'pause';
+}
+
+filterEl.addEventListener('input', render);
+listEl.addEventListener('scroll', () => {
+  autoscroll = listEl.scrollTop + listEl.clientHeight >= listEl.scrollHeight - 20;
+});
+
+function connect() {
+  const es = new EventSource('/events');
+  es.onopen = () => { dotEl.classList.add('live'); statEl.textContent = 'live'; };
+  es.onerror = () => { dotEl.classList.remove('live'); statEl.textContent = 'disconnected'; };
+  es.onmessage = (ev) => {
+    if (paused) return;
+    try {
+      const r = JSON.parse(ev.data);
+      records.push(r);
+      if (records.length > 5000) records.splice(0, records.length - 5000);
+      render();
+    } catch {}
+  };
+}
+connect();
+</script>
+</body>
+</html>

@@ -1,0 +1,21 @@
+# build artifacts
+/gomim
+/bin/
+/dist/
+
+# captured traffic - never commit
+*.jsonl
+*.log
+
+# certificate material - never commit
+ca.pem
+ca.key
+*.pem
+*.key
+.gomim/
+
+# editor / OS noise
+.DS_Store
+.idea/
+.vscode/
+*.swp
